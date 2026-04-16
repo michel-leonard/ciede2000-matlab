@@ -1,0 +1,74 @@
+name: CIEDE2000 Test in MATLAB (canonical)
+
+on:
+  workflow_dispatch:
+
+env:
+  n_lines: 100000000
+
+jobs:
+  test-implementation-de00-matlab-canonical:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 📂 For each step below, a new shell will be started at the repository root
+        uses: actions/checkout@v6
+
+      - name: 📦 Set up GNU Octave and GCC
+        run: command -v octave > /dev/null || { sudo apt-get update --allow-unauthenticated && sudo apt-get install --allow-unauthenticated --no-install-recommends --assume-yes octave ; }
+
+      - name: 🔧 Create MATLAB Driver
+        run: |
+          seed=$(head -c 8 /dev/urandom | od -An -t x8 | tr -d ' ')
+          echo "seed=0x$seed"
+          printf '%s\n' '' \
+          "function main()" \
+          "	rand ('seed', 0x$seed);" \
+          "	n_lines_remaining = $n_lines;" \
+          "	n_lines_chunk = 1000000;" \
+          "	max_err = 0.0;" \
+          "	l1 = round(rand(n_lines_chunk, 1) * 1000000.0) / 10000.0;" \
+          "	a1 = round(rand(n_lines_chunk, 1) * 256000.0 - 128000.0) / 10000.0;" \
+          "	b1 = round(rand(n_lines_chunk, 1) * 256000.0 - 128000.0) / 10000.0;" \
+          "	while 0 < n_lines_remaining" \
+          "		if n_lines_remaining < n_lines_chunk" \
+          "			n_lines_chunk = n_lines_remaining;" \
+          "			l1 = l1(1:n_lines_remaining);" \
+          "			a1 = a1(1:n_lines_remaining);" \
+          "			b1 = b1(1:n_lines_remaining);" \
+          "		end" \
+          "		n_lines_remaining -= n_lines_chunk;" \
+          "		l2 = round(rand(n_lines_chunk, 1) * 1000000.0) / 10000.0;" \
+          "		a2 = round(rand(n_lines_chunk, 1) * 256000.0 - 128000.0) / 10000.0;" \
+          "		b2 = round(rand(n_lines_chunk, 1) * 256000.0 - 128000.0) / 10000.0;" \
+          "		kl = round(9.0 + rand(n_lines_chunk, 1) * 2.0) / 10.0;" \
+          "		kc = round(9.0 + rand(n_lines_chunk, 1) * 2.0) / 10.0;" \
+          "		kh = round(9.0 + rand(n_lines_chunk, 1) * 2.0) / 10.0;" \
+          "		de1 = deltaE2000([l1 a1 b1], [l2 a2 b2], [kl kc kh])';" \
+          "		de2 = ciede2000(l1, a1, b1, l2, a2, b2, kl, kc, kh, true);" \
+          "		err = abs(de2 - de1);" \
+          "		err = max(err);" \
+          "		if max_err < err" \
+          "			max_err = err;" \
+          "			fprintf('The largest deviation between our implementation and the reference implementation (University of Rochester) is %.2g.\n', max_err);" \
+          "		end" \
+          "		l1 = l2;" \
+          "		a1 = a2;" \
+          "		b1 = b2;" \
+          "	end" \
+          "	if 1E-13 < max_err" \
+          "		exit(1);" \
+          "	else" \
+          "		exit(0);" \
+          "	end" \
+          "end" \
+          "" \
+          '' > main.m
+          cat ciede2000.m >> main.m
+          echo "URL:https://hajim.rochester.edu/ece/sites/gsharma/ciede2000/dataNprograms/deltaE2000.m"
+          wget -O- --no-verbose --no-check-certificate --timeout=5 --tries=2 https://ciede2000.pages-perso.free.fr/static/github//deltaE2000.m |
+          awk 'BEGIN{display=0;print "function de00 = deltaE2000(Labstd,Labsample, KLCH)\nde00 = []; kl =KLCH(:,1)\x27; kc=KLCH(:,2)\x27; kh =KLCH(:,3)\x27;"}{if($0 ~ /Lstd/){display=1}else if($0 ~ /return/){display=0}gsub(/\*S/,".*S");if(display)print}END{print "end"}' >> main.m
+
+      - name: 🚀 Run test cases in MATLAB
+        run: octave-cli main.m

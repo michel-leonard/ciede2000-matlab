@@ -1,0 +1,91 @@
+name: CIEDE2000 Test in MATLAB
+
+on:
+  workflow_dispatch:
+
+env:
+  n_csv_lines: 10000000
+
+jobs:
+  test-ciede2000-matlab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: 📂 For each step below, a new shell will be started at the repository root
+        uses: actions/checkout@v6
+
+      - name: 📦 Set up GNU Octave and GCC
+        run: |
+          command -v octave > /dev/null || { sudo apt-get update --allow-unauthenticated && sudo apt-get install --allow-unauthenticated --no-install-recommends --assume-yes octave ; }
+          command -v gcc > /dev/null || { sudo apt-get update --allow-unauthenticated && sudo apt-get install --allow-unauthenticated --no-install-recommends --assume-yes gcc ; }
+
+      - name: 🔧 Prepare the MATLAB testing file
+        run: |
+          printf '%s\n' '' \
+          'function main(filename, canonical)' \
+          '    fid = fopen(filename, "r");' \
+          '    chunk_size = 1000000;' \
+          '    canonical = canonical == "-c";' \
+          '    fmt = "%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g,%.17g\n";' \
+          '    while true' \
+          '        data = textscan(fid, "%f%f%f%f%f%f%f%f%f", chunk_size, "Delimiter", ",","CollectOutput",true);' \
+          '        if isempty(data{1}) || isempty(data{1})' \
+          '            break;' \
+          '        end' \
+          '        lab = data{1};' \
+          '        deltaE = ciede2000(lab(:,1), lab(:,2), lab(:,3), lab(:,4), lab(:,5), lab(:,6), lab(:,7), lab(:,8), lab(:,9), canonical);' \
+          "        fprintf(fmt, [lab'; deltaE']);" \
+          '    end' \
+          '    fclose(fid);' \
+          'end' \
+          '' > main.m
+
+      - name: 🌐️ Download the CIEDE2000 driver program
+        run: wget --no-verbose --no-check-certificate --timeout=5 --tries=2 https://ciede2000.pages-perso.free.fr/static/github/ciede2000-native-precision-driver.c
+
+      - name: ⚙️ Compile the CIEDE2000 driver program in C99
+        run: gcc --version && gcc -std=c99 -Wall -pedantic -O2 -g ciede2000-native-precision-driver.c -o ciede2000-native -lm
+
+      - name: 🎨 Generate ΔE2000 color difference test cases
+        run: |
+          # Splits the large file into as many smaller files as there are vCPUs
+          n_cpu=$(nproc) && n_cpu=$(( 1 < n_cpu ? n_cpu >> 1 : n_cpu )) && ./ciede2000-native --number $n_csv_lines --with-weights |
+          split --unbuffered --lines=$(( ($n_csv_lines + $n_cpu - 1) / $n_cpu )) --numeric-suffixes=1 --additional-suffix=.csv - test-cases-
+          # Shows the name, size and first line of newly created files
+          du -h test-cases-* | awk '{getline line < $2; print $2, "(" $1 "B) contains L*a*b* color pairs for vCPU " NR ", first values =", line}'
+
+      - name: ⚡ Solves test cases by calculating ΔE2000 in Matlab (parallelized operation)
+        run: |
+          for file in test-cases-*; do
+            OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 octave-cli --eval "main(\"$file\", \"-s\")" > solved-simplified-$file &
+            echo "Processes $file ($(wc -l < $file) lines) in parallel ➤ solved-simplified-$file"
+            OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 octave-cli --eval "main(\"$file\", \"-c\")" > solved-canonical-$file &
+            echo "Processes $file ($(wc -l < $file) lines) in parallel ➤ solved-canonical-$file"
+          done
+          wait
+
+      - name: 🚀 Check that C99 calculations matches Matlab’s
+        run:  |
+          cat solved-simplified-* | ./ciede2000-native --precision 11 > summary-simplified.txt &
+          cat solved-canonical-* | ./ciede2000-native --precision 11 > summary-canonical.txt &
+          wait
+
+      - name: 🏁 Conclusion
+        run: |
+          for compliance in simplified canonical; do
+            file="summary-$compliance.txt"
+            cat "$file"
+            #
+            if [ "${file%canonical.txt}" = "$file" ]; then
+              Q1="[ ] CANONICAL [X] SIMPLIFIED"
+            else
+              Q1="[X] CANONICAL [ ] SIMPLIFIED"
+            fi
+            if grep -Fq "$Q1" "$file" && grep -Fq "Error : 0" "$file" && grep -Fq "Successes : $n_csv_lines" "$file"; then
+              echo "✔️ Verification of $file successful: all $n_csv_lines color differences were correctly calculated."
+            else
+              echo "❌ Verification failed. See above for details."
+              exit 1
+            fi
+          done
